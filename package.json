@@ -1,0 +1,1 @@
+{"scripts":{"import":"node scripts/import.mjs"},"dependencies":{"@supabase/supabase-js":"^2.45.4","rss-parser":"^3.13.0"},"devDependencies":{}}
