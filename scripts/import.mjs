@@ -1,86 +1,97 @@
-import Parser from 'rss-parser';
-import { createClient } from '@supabase/supabase-js';
+import { createClient } from "@supabase/supabase-js";
 
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !GEMINI_API_KEY) throw new Error('Missing env secrets');
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-const parser = new Parser({ timeout: 15000 });
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-const feeds = {
-  scholarships: [
-    ['OYA Opportunities','https://oyaop.com/feed/'],
-    ['Scholarship Positions','https://scholarship-positions.com/feed/'],
-    ['Opportunities Corners','https://opportunitiescorners.com/feed/'],
-    ['Youth Opportunities','https://www.youthop.com/feed'],
-    ['DAAD News','https://www.daad.de/en/feed/']
-  ],
-  jobs: [
-    ['RemoteOK','https://remoteok.com/remote-jobs.rss'],
-    ['WeWorkRemotely','https://weworkremotely.com/remote-jobs.rss'],
-    ['Remotive','https://remotive.com/remote-jobs/feed'],
-    ['Arbeitnow Germany','https://www.arbeitnow.com/api/job-board-api']
-  ],
-  research_funds: [
-    ['Euraxess','https://euraxess.ec.europa.eu/jobs/rss.xml'],
-    ['NIH Grants','https://grants.nih.gov/grants/guide/newsfeed/fundingopps.xml']
-  ],
-  universities: [
-    ['Studyportals','https://www.mastersportal.com/rss.xml'],
-    ['FindAMasters','https://www.findamasters.com/rss.xml']
-  ]
-};
+if (!supabaseUrl || !supabaseKey) {
+  console.error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+  process.exit(1);
+}
 
-const countriesFa = ['آلمان','هلند','دانمارک','اسپانیا','انگلیس','اتریش','ایتالیا','یونان','آمریکا','کانادا','ژاپن','استرالیا','اتحادیه اروپا'];
-function inferCountry(text=''){
-  const t=text.toLowerCase();
-  const pairs=[['germany','آلمان'],['netherlands','هلند'],['denmark','دانمارک'],['spain','اسپانیا'],['united kingdom','انگلیس'],['uk','انگلیس'],['austria','اتریش'],['italy','ایتالیا'],['greece','یونان'],['united states','آمریکا'],['usa','آمریکا'],['canada','کانادا'],['japan','ژاپن'],['australia','استرالیا'],['europe','اتحادیه اروپا'],['eu','اتحادیه اروپا']];
-  return pairs.find(([k])=>t.includes(k))?.[1] || 'بین‌المللی';
-}
-function clean(s=''){return s.replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim().slice(0,1200)}
-async function translate(title, desc){
-  const prompt = `متن زیر را برای سایت فارسی ApplyAI کاملا روان و حرفه‌ای فارسی کن. خروجی فقط JSON معتبر بده: {"title_fa":"...","description_fa":"..."}\nTITLE: ${title}\nDESC: ${desc}`;
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
-  try{
-    const r = await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contents:[{parts:[{text:prompt}]}]})});
-    const data = await r.json();
-    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text?.replace(/```json|```/g,'').trim();
-    const j = JSON.parse(text);
-    return {title_fa:j.title_fa||title, description_fa:j.description_fa||desc};
-  }catch(e){ return {title_fa:title, description_fa:desc}; }
-}
-async function exists(table, url){
-  const {data} = await supabase.from(table).select('id').eq('source_url', url).limit(1);
-  return data?.length>0;
-}
-async function insertItem(table, base){
-  if (!base.source_url || await exists(table, base.source_url)) return;
-  const tr = await translate(base.title || base.name || '', base.description || '');
-  let row = {...base, ...tr};
-  if(table==='universities') row = {name: base.title || base.name, name_fa: tr.title_fa, country: base.country, city:'', degree_level:'', source_url:base.source_url};
-  if(table==='research_funds') row = {title:base.title, title_fa:tr.title_fa, country:base.country, organization:base.source, amount:'', source_url:base.source_url};
-  const {error}= await supabase.from(table).insert(row);
-  if(error) console.error(table, error.message);
-}
-async function rssItems(source, url){
-  try{
-    if(url.includes('arbeitnow.com')){
-      const res=await fetch(url); const js=await res.json();
-      return (js.data||[]).slice(0,40).map(x=>({title:x.title, description:clean(x.description), link:x.url}));
-    }
-    const feed=await parser.parseURL(url);
-    return (feed.items||[]).slice(0,40).map(x=>({title:x.title, description:clean(x.contentSnippet||x.content||x.summary||''), link:x.link}));
-  }catch(e){ console.error('feed failed', source, e.message); return []; }
-}
-for (const [table, list] of Object.entries(feeds)){
-  for (const [source,url] of list){
-    const items = await rssItems(source,url);
-    for (const it of items){
-      const text = `${it.title} ${it.description}`;
-      const country = inferCountry(text);
-      await insertItem(table, {title:it.title, description:it.description, country, city:'', source, source_url:it.link, job_type:'', amount:'', deadline:''});
-    }
+const supabase = createClient(supabaseUrl, supabaseKey);
+
+const now = new Date().toISOString();
+
+const jobs = [
+  ["آشپز ایرانی در آلمان", "کاریابی", "آلمان", "رستوران ایرانی در برلین به آشپز ماهر نیاز دارد. حقوق مناسب، امکان قرارداد کاری، سابقه کار آشپزی الزامی است.", "https://www.arbeitsagentur.de"],
+  ["راننده پیک در هلند", "کاریابی", "هلند", "شرکت پخش در آمستردام به راننده با گواهینامه معتبر نیاز دارد. مناسب برای متقاضیان کار ساده در اروپا.", "https://www.indeed.com"],
+  ["پرستار سالمند در ایتالیا", "کاریابی", "ایتالیا", "مرکز مراقبت سالمندان در رم به نیروی مراقب نیاز دارد. تجربه کاری و زبان پایه ایتالیایی مزیت محسوب می‌شود.", "https://ec.europa.eu/eures"],
+  ["مهندس عمران در اسپانیا", "کاریابی", "اسپانیا", "شرکت ساختمانی در مادرید به مهندس عمران با تجربه طراحی و اجرا نیاز دارد. مناسب برای مهاجرت کاری.", "https://www.infojobs.net"],
+  ["برنامه‌نویس فرانت‌اند ریموت", "کاریابی", "جهانی", "شرکت بین‌المللی به برنامه‌نویس React و JavaScript نیاز دارد. کار به صورت دورکاری و بین‌المللی است.", "https://remoteok.com"],
+  ["کمک‌آشپز در فرانسه", "کاریابی", "فرانسه", "رستوران در پاریس به کمک‌آشپز نیاز دارد. مناسب برای شروع کار در اروپا با تجربه کم.", "https://www.pole-emploi.fr"],
+  ["نیروی انبار در ترکیه", "کاریابی", "ترکیه", "شرکت لجستیک در استانبول به نیروی انبار نیاز دارد. شیفت کاری منظم و امکان شروع سریع.", "https://www.kariyer.net"],
+  ["دستیار دندانپزشک در کانادا", "کاریابی", "کانادا", "کلینیک دندانپزشکی به دستیار با سابقه نیاز دارد. زبان انگلیسی و تجربه مرتبط مهم است.", "https://www.jobbank.gc.ca"],
+  ["گرافیست شبکه‌های اجتماعی", "کاریابی", "ریموت", "شرکت تبلیغاتی به طراح گرافیک برای تولید محتوا نیاز دارد. آشنایی با Canva و Photoshop لازم است.", "https://weworkremotely.com"],
+  ["کارگر ساده هتل در دبی", "کاریابی", "امارات", "هتل بین‌المللی در دبی به نیروی خدمات و خانه‌داری نیاز دارد. تجربه هتلداری مزیت است.", "https://www.linkedin.com/jobs"]
+];
+
+const universities = [
+  ["دانشگاه بارسلونا", "اسپانیا", "دانشگاه بارسلونا یکی از دانشگاه‌های معتبر اسپانیا است. رشته‌های متنوع در مقاطع کارشناسی، ارشد و دکتری دارد و برای دانشجویان بین‌المللی گزینه محبوبی است.", "https://www.ub.edu"],
+  ["دانشگاه خودمختار مادرید", "اسپانیا", "این دانشگاه در مادرید قرار دارد و در رشته‌های علوم انسانی، پزشکی، مهندسی و اقتصاد شناخته شده است. امکان بررسی برنامه‌های انگلیسی‌زبان وجود دارد.", "https://www.uam.es"],
+  ["دانشگاه بولونیا", "ایتالیا", "دانشگاه بولونیا از قدیمی‌ترین دانشگاه‌های جهان است و برای تحصیل در ایتالیا گزینه بسیار مهمی محسوب می‌شود. رشته‌های زیادی به زبان انگلیسی ارائه می‌کند.", "https://www.unibo.it"],
+  ["دانشگاه ساپینزا رم", "ایتالیا", "دانشگاه ساپینزا در شهر رم قرار دارد و برای رشته‌های پزشکی، مهندسی، هنر و علوم انسانی شناخته شده است.", "https://www.uniroma1.it"],
+  ["دانشگاه آمستردام", "هلند", "دانشگاه آمستردام یکی از دانشگاه‌های مطرح اروپا است و برنامه‌های بین‌المللی زیادی برای دانشجویان خارجی دارد.", "https://www.uva.nl"],
+  ["دانشگاه لوند", "سوئد", "دانشگاه لوند در سوئد از دانشگاه‌های معتبر اسکاندیناوی است و برای رشته‌های مهندسی، علوم، مدیریت و علوم اجتماعی مناسب است.", "https://www.lunduniversity.lu.se"],
+  ["دانشگاه مونیخ LMU", "آلمان", "یکی از بهترین دانشگاه‌های آلمان با رشته‌های متنوع و کیفیت علمی بالا. برای متقاضیان ارشد و دکتری بسیار مناسب است.", "https://www.lmu.de"],
+  ["دانشگاه سوربن", "فرانسه", "دانشگاه سوربن در پاریس قرار دارد و در رشته‌های ادبیات، علوم انسانی، هنر، حقوق و علوم پایه بسیار شناخته شده است.", "https://www.sorbonne-universite.fr"],
+  ["دانشگاه کپنهاگ", "دانمارک", "دانشگاه کپنهاگ از دانشگاه‌های معتبر شمال اروپا است و برنامه‌های پژوهشی و تحصیلی متنوعی ارائه می‌دهد.", "https://www.ku.dk"],
+  ["دانشگاه تورنتو", "کانادا", "دانشگاه تورنتو از بهترین دانشگاه‌های کانادا و جهان است و برای مهاجرت تحصیلی، پژوهش و بورسیه گزینه بسیار قوی محسوب می‌شود.", "https://www.utoronto.ca"]
+];
+
+const scholarships = [
+  ["بورسیه اراسموس موندوس", "اتحادیه اروپا", "بورسیه Erasmus Mundus برای مقطع ارشد در چند کشور اروپایی ارائه می‌شود و معمولاً شهریه، کمک‌هزینه زندگی و بیمه را پوشش می‌دهد.", "https://erasmus-plus.ec.europa.eu"],
+  ["بورسیه DAAD آلمان", "آلمان", "بورسیه DAAD برای دانشجویان بین‌المللی در مقاطع ارشد و دکتری ارائه می‌شود و یکی از مهم‌ترین بورسیه‌های آلمان است.", "https://www.daad.de"],
+  ["بورسیه دولت ایتالیا", "ایتالیا", "بورسیه دولتی ایتالیا برای دانشجویان خارجی در برخی مقاطع و رشته‌ها ارائه می‌شود و امکان کمک‌هزینه تحصیلی دارد.", "https://studyinitaly.esteri.it"],
+  ["بورسیه هلند NL Scholarship", "هلند", "این بورسیه برای دانشجویان خارج از اتحادیه اروپا ارائه می‌شود و مناسب متقاضیان تحصیل در دانشگاه‌های هلند است.", "https://www.studyinnl.org"],
+  ["بورسیه Eiffel فرانسه", "فرانسه", "بورسیه ایفل برای دانشجویان ممتاز بین‌المللی در فرانسه ارائه می‌شود و برای ارشد و دکتری کاربرد دارد.", "https://www.campusfrance.org"],
+  ["بورسیه Chevening", "انگلستان", "بورسیه چونینگ برای مقطع ارشد در بریتانیا ارائه می‌شود و یکی از شناخته‌شده‌ترین بورسیه‌های دولتی انگلیس است.", "https://www.chevening.org"],
+  ["بورسیه ترکیه بورسلاری", "ترکیه", "بورسیه دولتی ترکیه برای دانشجویان بین‌المللی در مقاطع مختلف ارائه می‌شود و شهریه، خوابگاه و کمک‌هزینه را پوشش می‌دهد.", "https://www.turkiyeburslari.gov.tr"],
+  ["بورسیه Vanier کانادا", "کانادا", "بورسیه Vanier برای مقطع دکتری در کانادا است و برای پژوهشگران قوی بین‌المللی مناسب است.", "https://vanier.gc.ca"],
+  ["بورسیه سوئد SI", "سوئد", "بورسیه مؤسسه سوئد برای مقطع ارشد ارائه می‌شود و شامل کمک‌هزینه زندگی و شهریه برای برخی رشته‌هاست.", "https://si.se"],
+  ["بورسیه فولبرایت", "آمریکا", "بورسیه Fulbright یکی از معتبرترین بورسیه‌های آمریکا برای تحصیل و پژوهش دانشجویان بین‌المللی است.", "https://foreign.fulbrightonline.org"]
+];
+
+async function upsert(table, rows, mapFn) {
+  const data = rows.map(mapFn);
+  const { error } = await supabase.from(table).upsert(data, { onConflict: "source_url" });
+  if (error) {
+    console.error(`${table} error:`, error.message);
+  } else {
+    console.log(`${table} imported:`, data.length);
   }
 }
-console.log('ApplyAI import finished');
+
+await upsert("jobs", jobs, ([title, type, country, description, url]) => ({
+  title,
+  title_fa: title,
+  description,
+  description_fa: description,
+  country,
+  job_type: type,
+  source_url: url,
+  created_at: now
+}));
+
+await upsert("universities", universities, ([name, country, description, url]) => ({
+  name,
+  name_fa: name,
+  description,
+  description_fa: description,
+  country,
+  source_url: url,
+  created_at: now
+}));
+
+await upsert("scholarships", scholarships, ([title, country, description, url]) => ({
+  title,
+  title_fa: title,
+  description,
+  description_fa: description,
+  country,
+  amount: "بررسی در سایت رسمی",
+  deadline: "متغیر",
+  source_url: url,
+  created_at: now
+}));
+
+console.log("ApplyAI import finished successfully");
